@@ -38,7 +38,8 @@ pipeline {
                         writeFile file: 'vault_pass.txt', text: "$VAULT_PASS"
                     }
                 }
-                    sh 'ansible --version'   
+                    sh 'ansible --version'  
+                    sh 'chmod 600 id_rsa' 
                     sh "ansible-playbook --private-key=id_rsa -u manish playbooks/$PLAYBOOK -i inventory.yml --vault-password-file vault_pass.txt"
                     sh 'rm -f vault_pass.txt'  // Cleanup
                     sh 'rm -f id_rsa'  // Cleanup
