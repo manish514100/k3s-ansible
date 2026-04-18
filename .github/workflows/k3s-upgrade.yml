@@ -1,0 +1,194 @@
+name: K3s Upgrade
+
+on:
+  workflow_dispatch:
+    inputs:
+      inventory:
+        description: |
+          Target inventory
+          k3s-single  → k3s_inventory.yml  (single node, server only)
+          k3s-multi   → inventory.yml       (server 192.168.16.227 + agent .228)
+          rpi         → rpi_inventory.yml   (RPi: server .13 + agents .14–.17)
+        required: true
+        type: choice
+        options:
+          - k3s-single
+          - k3s-multi
+          - rpi
+      k3s_version:
+        description: 'Target k3s version (e.g. v1.32.0+k3s1) — leave empty to use inventory default'
+        required: false
+        type: string
+        default: ''
+      tags:
+        description: |
+          Ansible tags — comma-separated, leave empty to run all.
+          Available role tags (if tagged): k3s_upgrade
+        required: false
+        type: string
+        default: ''
+      limit:
+        description: |
+          Limit execution to specific host group(s) — comma-separated, leave empty for all.
+          Available: server, agent
+          Note: servers are upgraded sequentially (serial: 1) to avoid etcd learner issues.
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Dry run — check mode only, no changes applied'
+        required: false
+        type: boolean
+        default: false
+      verbose:
+        description: 'Enable verbose output (-vv)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  ANSIBLE_FORCE_COLOR: "1"
+  ANSIBLE_HOST_KEY_CHECKING: "false"
+  ANSIBLE_STDOUT_CALLBACK: "default"
+  ANSIBLE_CALLBACK_RESULT_FORMAT: "yaml"
+  ANSIBLE_COLLECTIONS_PATH: "${{ github.workspace }}/collections"
+
+jobs:
+  k3s-upgrade:
+    name: "K3s Upgrade — ${{ github.event.inputs.k3s_version != '' && github.event.inputs.k3s_version || 'inventory default' }}"
+    runs-on: [self-hosted, Linux]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Cache Ansible Collections ──────────────────────────────────────────
+      - name: Cache Ansible collections
+        id: cache-collections
+        uses: actions/cache@v4
+        with:
+          path: ./collections
+          key: ansible-collections-${{ hashFiles('collections/requirements.yml') }}
+
+      # ── Install Ansible Collections ────────────────────────────────────────
+      - name: Install Ansible collections
+        if: steps.cache-collections.outputs.cache-hit != 'true'
+        run: |
+          ansible-galaxy collection install \
+            -r collections/requirements.yml \
+            -p ./collections
+
+      # ── SSH Key ────────────────────────────────────────────────────────────
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ANSIBLE_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
+          echo "UserKnownHostsFile /dev/null" >> ~/.ssh/config
+
+      # ── Ansible Vault Password ─────────────────────────────────────────────
+      - name: Setup Ansible Vault password
+        run: |
+          echo "${{ secrets.ANSIBLE_VAULT_PASS }}" > ~/.vault_pass
+          chmod 600 ~/.vault_pass
+
+      # ── Run upgrade.yml ────────────────────────────────────────────────────
+      - name: Run upgrade.yml
+        run: |
+          case "${{ github.event.inputs.inventory }}" in
+            k3s-single) INVENTORY="k3s_inventory.yml" ;;
+            rpi)        INVENTORY="rpi_inventory.yml" ;;
+            *)          INVENTORY="inventory.yml" ;;
+          esac
+
+          CMD="ansible-playbook playbooks/upgrade.yml"
+          CMD="$CMD -i $INVENTORY"
+          CMD="$CMD --vault-password-file ~/.vault_pass"
+
+          # Host limit (optional)
+          LIMIT="${{ github.event.inputs.limit }}"
+          if [ -n "$LIMIT" ]; then
+            CMD="$CMD --limit $LIMIT"
+          fi
+
+          # Tags (optional)
+          TAGS="${{ github.event.inputs.tags }}"
+          if [ -n "$TAGS" ]; then
+            CMD="$CMD --tags $TAGS"
+          fi
+
+          # k3s version override (optional)
+          K3S_VERSION="${{ github.event.inputs.k3s_version }}"
+          if [ -n "$K3S_VERSION" ]; then
+            CMD="$CMD -e k3s_version=$K3S_VERSION"
+          fi
+
+          # Dry run
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            CMD="$CMD --check --diff"
+            echo "⚠️  DRY RUN MODE — no changes will be applied"
+          fi
+
+          # Verbose
+          if [ "${{ github.event.inputs.verbose }}" = "true" ]; then
+            CMD="$CMD -vv"
+          fi
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "▶ Inventory: $INVENTORY"
+          echo "▶ Hosts:    ${LIMIT:-server + agent}"
+          echo "▶ Tags:     ${TAGS:-all}"
+          echo "▶ Version:  ${K3S_VERSION:-inventory default}"
+          echo "▶ Running:  $CMD"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          eval $CMD
+
+      # ── Notify on failure ──────────────────────────────────────────────────
+      - name: Notify on failure
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d parse_mode="HTML" \
+            -d text="$(cat <<EOF
+          ❌ <b>K3s Upgrade Failed</b>
+
+          📋 <b>Workflow:</b> ${{ github.workflow }}
+          📦 <b>Repo:</b> ${{ github.repository }}
+          🌿 <b>Branch:</b> ${{ github.ref_name }}
+          👤 <b>Triggered by:</b> ${{ github.actor }}
+          🎯 <b>Version:</b> ${{ github.event.inputs.k3s_version != '' && github.event.inputs.k3s_version || 'inventory default' }}
+          🕐 <b>Time:</b> $(date -u '+%Y-%m-%d %H:%M UTC')
+          🔗 <b>Logs:</b> ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )"
+
+      # ── Notify on success ──────────────────────────────────────────────────
+      - name: Notify on success
+        if: success()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d parse_mode="HTML" \
+            -d text="$(cat <<EOF
+          ✅ <b>K3s Upgrade Succeeded</b>
+
+          📋 <b>Workflow:</b> ${{ github.workflow }}
+          📦 <b>Repo:</b> ${{ github.repository }}
+          🌿 <b>Branch:</b> ${{ github.ref_name }}
+          👤 <b>Triggered by:</b> ${{ github.actor }}
+          🎯 <b>Version:</b> ${{ github.event.inputs.k3s_version != '' && github.event.inputs.k3s_version || 'inventory default' }}
+          🕐 <b>Time:</b> $(date -u '+%Y-%m-%d %H:%M UTC')
+          🔗 <b>Logs:</b> ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )"
+
+      # ── Cleanup ───────────────────────────────────────────────────────────
+      - name: Cleanup secrets
+        if: always()
+        run: |
+          rm -f ~/.vault_pass
+          rm -f ~/.ssh/id_rsa
+          rm -f ~/.ssh/config
+          echo "✅ Secrets cleaned up"
