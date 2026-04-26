@@ -144,35 +144,23 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           eval $CMD
 
-      # ── Notify on failure ──────────────────────────────────────────────────
-      - name: Notify on failure
-        if: failure()
+      # ── Notify result ─────────────────────────────────────────────────────
+      - name: Notify result
+        if: always()
         run: |
+          STATUS="${{ job.status }}"
+          if [ "$STATUS" = "success" ]; then
+            ICON="✅"
+            RESULT="Succeeded"
+          else
+            ICON="❌"
+            RESULT="Failed"
+          fi
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d parse_mode="HTML" \
             -d text="$(cat <<EOF
-          ❌ <b>K3s Upgrade Failed</b>
-
-          📋 <b>Workflow:</b> ${{ github.workflow }}
-          📦 <b>Repo:</b> ${{ github.repository }}
-          🌿 <b>Branch:</b> ${{ github.ref_name }}
-          👤 <b>Triggered by:</b> ${{ github.actor }}
-          🎯 <b>Version:</b> ${{ github.event.inputs.k3s_version != '' && github.event.inputs.k3s_version || 'inventory default' }}
-          🕐 <b>Time:</b> $(date -u '+%Y-%m-%d %H:%M UTC')
-          🔗 <b>Logs:</b> ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          EOF
-          )"
-
-      # ── Notify on success ──────────────────────────────────────────────────
-      - name: Notify on success
-        if: success()
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d parse_mode="HTML" \
-            -d text="$(cat <<EOF
-          ✅ <b>K3s Upgrade Succeeded</b>
+          ${ICON} <b>K3s Upgrade ${RESULT}</b>
 
           📋 <b>Workflow:</b> ${{ github.workflow }}
           📦 <b>Repo:</b> ${{ github.repository }}
